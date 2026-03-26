@@ -1,0 +1,23 @@
+# Uploads & generated
+/upload/
+/pdfDoc/
+/myzip/
+/myzips/
+/temps/
+/system/
+/application - Copy/
+# Zip
+*.zip
+
+# Config (sensitive)
+application/config/config.php
+application/config/database.php
+
+# Logs
+*.log
+
+application/third_party/
+*-firebase-adminsdk-*.json
+*.json
+!composer.json
+ring-*.json

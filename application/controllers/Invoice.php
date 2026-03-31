@@ -105,7 +105,7 @@ class Invoice extends CI_Controller
         
         //   print_r($data); exit;
         // 2. Load HTML from view
-        $html = $this->load->view('ring_invoice', $data, true);  
+         $html = $this->load->view('ring_invoice', $data, true);   //exit ;
 
         // 3. Load mPDF library
        // $this->load->library('mn_pdf');
@@ -118,10 +118,10 @@ class Invoice extends CI_Controller
         $this->mpdf->keep_table_proportions = true;
         $this->mpdf->WriteHTML($html);
 
-
+           
         // 6. Output PDF (I = inline, D = download)
-        $fileName = 'RING_Invoice_' . ($visit_id ?: 'print') . '.pdf';
-        $this->mpdf->Output($fileName, 'I');
+       $fileName = 'RING_Invoice_' . ($visit_id ?: 'print') . '.pdf';
+       $this->mpdf->Output($fileName, 'I');
     }
 
     public function print_new($chargeID = null)

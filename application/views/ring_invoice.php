@@ -259,7 +259,7 @@ $clinicEmail   = $tenant['email'] ?? '';
                 </tr>
                 </thead>
                 <tbody>
-                    <?php foreach($Presp as $i=>$p) {  $totalTax +=$Bill[$i]->TaxAmount ;   $totalAmt  += $p->Amount+$Bill[$i]->TaxAmount ; $totalDisc += $p->Discount  ;     ?>
+                    <?php foreach($Presp as $i=>$p) {  $totalTax +=number_format($Bill[$i]->TaxAmount ?? 0, 2) ;   $totalAmt  += number_format($Bill[$i]->TaxAmount ?? 0, 2) ; $totalDisc += $p->Discount  ;     ?>
                 <tr>
                     <td class="mono"><?php echo $p->Code; ?></td>
                     <td><?php echo $p->Description; ?></td>

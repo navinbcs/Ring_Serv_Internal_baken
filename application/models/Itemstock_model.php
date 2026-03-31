@@ -42,6 +42,10 @@ class Itemstock_model extends CI_Model
          $userId
       ];
 
+      if(empty($data['purchasePrice']))  $data['purchasePrice'] =123 ;
+
+      //echo $data['purchasePrice'] ; exit ;
+
       $sql = "EXEC dbo.usp_ItemStock_Create ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?";
       $q = $this->db->query($sql, $params);
       $row = $q->row_array();

@@ -1,27 +1,124 @@
 <?php
 class ReportPdfModel extends CI_Model
 {
-    public function __construct()
+	public function __construct()
     {
         parent::__construct();
         $this->load->database();
     }
 
-    public function getDataFromSP($spName, $patientId, $enrollmentID)
-    {
-        $sp = 'EXEC ' . $spName;
-        $query = $this->db->query(" $sp " . $patientId . "," . $enrollmentID . " ");
-        $result = $query->result();
+    public function getDataFromSP($spName, $patientId, $enrollmentID){
+        $sp = 'EXEC '.$spName;
+		$query = $this->db->query(" $sp ".$patientId.",".$enrollmentID." ");
+		$result = $query->result();
         //  echo $this->db->last_query();
-        return $result;
+		return $result;
     }
-    public function getEnrolentID($chargeHeaderID)
-    {
-
-        $query = $this->db->query("select * from ChargeEntryHeader where  ID=" . $chargeHeaderID);
-        $result = $query->result();
+    public function getEnrolentID($chargeHeaderID){
+        
+		$query = $this->db->query("select * from ChargeEntryHeader where  ID=".$chargeHeaderID);
+		$result = $query->result();
         //  echo $this->db->last_query();
-        return $result;
+		return $result;
+    }
+
+    /**
+     * usp_rpt_BillDetails often omits TaxAmount/NetAmount. Overlay from ChargeEntryDetail
+     * (same source as Billing UI) so PDF/API match ChargeEntryHeader edit screen.
+     */
+    public function enrichBillDetailsFromChargeEntryDetails($chargeEntryHeaderId, $billRows)
+    {
+        if (empty($chargeEntryHeaderId) || empty($billRows)) {
+            return $billRows;
+        }
+
+        $cedLines = $this->db->query(
+            'SELECT CED.Id, CED.Quantity, CED.UnitPrice, CED.Amount, CED.Discount, ' .
+            'CED.TaxAmount, CED.NetAmount, ' .
+            'BCS.BillChargesServiceCode AS ServiceCode, ' .
+            'im.BillingType AS LineBillingType ' .
+            'FROM ChargeEntryDetail CED ' .
+            'INNER JOIN ChargeEntryHeader CEH ON CEH.Id = CED.ChargeEntryHeaderId ' .
+            'LEFT JOIN dbo.ItemMaster im ON im.Id = CED.MasterTypeId AND im.TenantId = CEH.TenantId ' .
+            'LEFT JOIN vBillChargesService BCS ON CED.MasterTypeId = BCS.ID ' .
+            'AND BCS.MasterTableId = CED.MasterTableId ' .
+            'WHERE CED.ChargeEntryHeaderId = ? ' .
+            'ORDER BY CED.Id',
+            [(int) $chargeEntryHeaderId]
+        )->result();
+
+        if (empty($cedLines)) {
+            return $billRows;
+        }
+
+        $n = count($cedLines);
+        $used = array_fill(0, $n, false);
+
+        foreach ($billRows as $p) {
+            $idx = $this->matchChargeEntryDetailIndex($p, $cedLines, $used);
+            if ($idx === null) {
+                continue;
+            }
+            $ced = $cedLines[$idx];
+            $used[$idx] = true;
+            $p->TaxAmount = $ced->TaxAmount;
+            $p->NetAmount = $ced->NetAmount;
+            $lineBt = null;
+            foreach (['LineBillingType', 'linebillingtype'] as $btKey) {
+                if (isset($ced->$btKey) && $ced->$btKey !== null && $ced->$btKey !== '') {
+                    $lineBt = $ced->$btKey;
+                    break;
+                }
+            }
+            if ($lineBt !== null) {
+                $p->BillingType = $lineBt;
+            }
+        }
+
+        return $billRows;
+    }
+
+    /**
+     * @param object $spRow     Row from usp_rpt_BillDetails
+     * @param array  $cedLines  DB rows from ChargeEntryDetail
+     * @param array  $used      Boolean flags per CED line
+     */
+    private function matchChargeEntryDetailIndex($spRow, $cedLines, &$used)
+    {
+        $code = isset($spRow->Code) ? trim((string) $spRow->Code) : '';
+        $qty = (float) ($spRow->Quantity ?? 0);
+        $rate = (float) ($spRow->UnitPrice ?? 0);
+        $amt = (float) ($spRow->Amount ?? 0);
+
+        for ($i = 0, $n = count($cedLines); $i < $n; $i++) {
+            if ($used[$i]) {
+                continue;
+            }
+            $c = $cedLines[$i];
+            $cCode = isset($c->ServiceCode) ? trim((string) $c->ServiceCode) : '';
+            if ($code !== '' && $cCode !== '' && strcasecmp($code, $cCode) !== 0) {
+                continue;
+            }
+            if (abs((float) $c->Quantity - $qty) > 0.0001) {
+                continue;
+            }
+            if (abs((float) $c->UnitPrice - $rate) > 0.0001) {
+                continue;
+            }
+            if ($amt > 0.0001 && abs((float) $c->Amount - $amt) > 0.02) {
+                continue;
+            }
+
+            return $i;
+        }
+
+        for ($i = 0, $n = count($cedLines); $i < $n; $i++) {
+            if (!$used[$i]) {
+                return $i;
+            }
+        }
+
+        return null;
     }
 
     public function fullReportPatientBilling($patientId, $enrollmentId)
@@ -127,7 +224,7 @@ class ReportPdfModel extends CI_Model
         ";
         $result['bill_details'] = $this->db->query($bill_sql, [$patientId, $enrollmentId])->result_array();
 
-        /*PAYMENT DETAILS*/
+                /*PAYMENT DETAILS*/
         $payment_sql = "
             SELECT DISTINCT 
                 CASE 
@@ -148,63 +245,6 @@ class ReportPdfModel extends CI_Model
         ";
         $result['payment_details'] = $this->db->query($payment_sql, [$patientId, $enrollmentId])->result_array();
 
-
-        return $result;
-    }
-
-
-    public function getClinicalSummary($patientId, $enrollmentID)
-    {
-        $result = [];
-
-        // Patient Details
-        $result['patient_details'] = $this->getDataFromSP(
-            'usp_rpt_PatientDetails',
-            $patientId,
-            $enrollmentID
-        );
-
-        // Allergies
-        $result['allergies'] = $this->getDataFromSP(
-            'usp_rpt_Allergies',
-            $patientId,
-            $enrollmentID
-        );
-
-        // Prescription
-        $result['prescription'] = $this->getDataFromSP(
-            'usp_rpt_Prescription',
-            $patientId,
-            $enrollmentID
-        );
-
-        // Medical History
-        $result['medical_history'] = $this->getDataFromSP(
-            'usp_rpt_Medicalhistory',
-            $patientId,
-            $enrollmentID
-        );
-
-        // Progress Notes
-        $result['progress_notes'] = $this->getDataFromSP(
-            'usp_rpt_ProgressNotes',
-            $patientId,
-            $enrollmentID
-        );
-
-        // Investigations
-        $result['investigations'] = $this->getDataFromSP(
-            'usp_rpt_Investigations',
-            $patientId,
-            $enrollmentID
-        );
-
-        // Discharge Notes
-        $result['discharge_notes'] = $this->getDataFromSP(
-            'usp_rpt_DischargeNotes',
-            $patientId,
-            $enrollmentID
-        );
 
         return $result;
     }

@@ -1,5 +1,5 @@
 <?php defined('BASEPATH') or exit('No direct script access allowed');
-
+date_default_timezone_set('Asia/Kuala_Lumpur');
 class Itemstock extends CI_Controller
 {
     public function __construct()
@@ -343,12 +343,14 @@ class Itemstock extends CI_Controller
         'BeforeQty'    => $beforeQty,
         'AfterQty'     => $afterQty,
         'BillId'       => $billId,                  // if you added this column
-        'TranDate'     => date('Y-m-d H:i:s'),      // optional; default exists
-        'CreatedAt'    => date('Y-m-d H:i:s'),      // optional; default exists
+       // 'TranDate'     => date('Y-m-d H:i:s'),      // optional; default exists
+     //   'CreatedAt'    => date('Y-m-d H:i:s'),      // optional; default exists
         'CreatedBy'    => 3554                      // TODO: replace with logged-in userId
     ];
 
     $this->db->trans_begin();
+    $this->db->set('TranDate', 'GETDATE()', false);
+    $this->db->set('CreatedAt', 'GETDATE()', false);
     $ok = $this->db->insert('dbo.ItemStockHistory', $row);
     if (!$ok) {
         $this->db->trans_rollback();

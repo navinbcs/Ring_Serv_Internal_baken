@@ -10,7 +10,7 @@ $meta        = $meta ?? [];
 $printedBy   = $printedBy ?? 'System';
 
 // Base64 Logo (100% mPDF reliable)
-$logoFile = FCPATH . 'assets/RingLogo.png';
+$logoFile = FCPATH . 'assets/SkeenLogo.png';
 $logoDataUri = '';
 if (file_exists($logoFile)) {
     $imgData = file_get_contents($logoFile);

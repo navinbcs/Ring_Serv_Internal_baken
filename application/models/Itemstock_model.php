@@ -15,6 +15,7 @@ class Itemstock_model extends CI_Model
    // --- CREATE ---
    public function create_stock(array $data, $userId = null)
    {
+        //  if(empty($data['purchasePrice']))  $data['purchasePrice'] =123 ;
       //  print_r($data); exit ;
          $payload = $params = [
          $data['TentId'],
@@ -42,7 +43,7 @@ class Itemstock_model extends CI_Model
          $userId
       ];
 
-      if(empty($data['purchasePrice']))  $data['purchasePrice'] =123 ;
+
 
       //echo $data['purchasePrice'] ; exit ;
 
@@ -671,7 +672,7 @@ public function list_stocks($filters = [], $limit = 50, $offset = 0)
             $this->db->where('TranDate <=', $dateTo);
         }
 
-        $this->db->order_by('TranDate',  'DESC');
+      //  $this->db->order_by('TranDate',  'DESC');
         $this->db->order_by('HistoryId', 'DESC');
         $this->db->limit($limit, $offset);
 

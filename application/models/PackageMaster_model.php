@@ -77,8 +77,8 @@ class PackageMaster_model extends CI_Model
                 (i.Description + ' - ' + i.Code + ' (Item)') AS DisplayText
             FROM dbo.ItemMaster i
             WHERE i.TenantId = ?
-              AND ISNULL(i.IsActive,1) = 1
-        ";
+             AND ISNULL(i.IsActive,1) = 1 and BillingType=1  ";
+       
 
         $params[] = (int)$tenantId;
 

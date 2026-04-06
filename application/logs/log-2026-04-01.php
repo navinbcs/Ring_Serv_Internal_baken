@@ -1,0 +1,7 @@
+<?php defined('BASEPATH') OR exit('No direct script access allowed'); ?>
+
+ERROR - 2026-04-01 04:02:32 --> Severity: Warning --> Undefined array key "HTTP_AUTHORIZATION" E:\Applications\RING_PHP\Ring_dev\application\controllers\Navigation.php 29
+ERROR - 2026-04-01 04:02:32 --> Severity: 8192 --> str_replace(): Passing null to parameter #3 ($subject) of type array|string is deprecated E:\Applications\RING_PHP\Ring_dev\application\controllers\Navigation.php 30
+ERROR - 2026-04-01 04:02:32 --> Severity: error --> Exception: Wrong number of segments E:\Applications\RING_PHP\Ring_dev\application\helpers\jwt_helper.php 35
+ERROR - 2026-04-01 05:36:53 --> Query error: [Microsoft][ODBC Driver 17 for SQL Server][SQL Server]Violation of UNIQUE KEY constraint 'UQ_FileMotionPlus_VisitId_TemplateId'. Cannot insert duplicate key in object 'dbo.FileMotionPlus'. The duplicate key value is (RCM01-00000084, 35). - Invalid query: INSERT INTO "FileMotionPlus" ("VisitId", "PatientId", "EnrollmentId", "TemplateId", "CreationDate") VALUES ('RCM01-00000084', 60767, 1442, 35, '2026-04-01 05:36:53')
+ERROR - 2026-04-01 05:41:59 --> Query error: [Microsoft][ODBC Driver 17 for SQL Server][SQL Server]Violation of UNIQUE KEY constraint 'UQ_FileMotionPlus_VisitId_TemplateId'. Cannot insert duplicate key in object 'dbo.FileMotionPlus'. The duplicate key value is (RCKL1-00000233, 5). - Invalid query: INSERT INTO "FileMotionPlus" ("VisitId", "PatientId", "EnrollmentId", "TemplateId", "CreationDate") VALUES ('RCKL1-00000233', 10511, 1376, 5, '2026-04-01 05:41:59')

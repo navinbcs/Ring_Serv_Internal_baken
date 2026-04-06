@@ -3,7 +3,156 @@ defined('BASEPATH') OR exit('No direct script access allowed');
 
 class Invoice extends CI_Controller
 {
-    public $currency;
+    /**
+     * Clinic URL from Tenants — RING.Web Administration.Tenant uses column WebSite (not Website).
+     */
+    private function invoice_tenant_website_from_enrollment($getData)
+    {
+        $v = trim((string) ($getData->TenantWebSite ?? ''));
+        if ($v !== '') {
+            return $v;
+        }
+        return '';
+    }
+
+    /**
+     * First non-empty property from a report SP row (column names vary by environment).
+     */
+    private function rpt_first_prop($obj, array $keys, $default = '')
+    {
+        if (!$obj || !is_object($obj)) {
+            return $default;
+        }
+        foreach ($keys as $k) {
+            if (!isset($obj->$k)) {
+                continue;
+            }
+            $v = $obj->$k;
+            if ($v === null || $v === '') {
+                continue;
+            }
+            if (is_scalar($v)) {
+                return trim((string) $v);
+            }
+        }
+
+        return $default;
+    }
+
+    /**
+     * Display scalar from SP row; formats DateTime as d/m/Y H:i (RING ClinicalSummary discharge band).
+     */
+    private function rpt_scalar_for_display($obj, array $keys)
+    {
+        if (!$obj || !is_object($obj)) {
+            return '';
+        }
+        foreach ($keys as $k) {
+            if (!isset($obj->$k)) {
+                continue;
+            }
+            $v = $obj->$k;
+            if ($v === null || $v === '') {
+                continue;
+            }
+            if ($v instanceof \DateTimeInterface) {
+                return $v->format('d/m/Y H:i');
+            }
+            if (is_string($v) || is_numeric($v)) {
+                return trim((string) $v);
+            }
+        }
+
+        return '';
+    }
+
+    /**
+     * @return int|null Minutes from midnight 0–1439, or null if not parseable
+     */
+    private function invoice_time_to_minutes($val)
+    {
+        if ($val === null || $val === '') {
+            return null;
+        }
+        if ($val instanceof DateTimeInterface) {
+            return ((int) $val->format('G')) * 60 + (int) $val->format('i');
+        }
+        if (is_numeric($val)) {
+            $n = (int) $val;
+            if ($n >= 0 && $n < 1440) {
+                return $n;
+            }
+        }
+        $s = trim((string) $val);
+        if (preg_match('/(\d{1,2}):(\d{2})(?::\d{2})?/', $s, $m)) {
+            return ((int) $m[1]) * 60 + (int) $m[2];
+        }
+        return null;
+    }
+
+    /** e.g. 9:30 am, 10:30 pm (12-hour, lowercase am/pm) */
+    private function invoice_minutes_to_ampm($minutes)
+    {
+        if ($minutes === null || $minutes < 0) {
+            return '';
+        }
+        $minutes = $minutes % 1440;
+        $h = intdiv($minutes, 60);
+        $m = $minutes % 60;
+        $ts = mktime($h, $m, 0, 1, 1, 2020);
+        $s = strtolower(date('g:i a', $ts));
+
+        return preg_replace('/:/', '.', $s, 1);
+    }
+
+    /**
+     * One line: earliest open to latest close across schedule rows (primary + secondary), 12h am/pm.
+     */
+    private function format_facility_working_hours($tenantId)
+    {
+        if (empty($tenantId)) {
+            return '';
+        }
+        $rows = $this->WebserviceModel->getWorkingScheduleOfTenant((int) $tenantId);
+        if (empty($rows)) {
+            return '';
+        }
+        $earliest = null;
+        $latest = null;
+        foreach ($rows as $r) {
+            $fromM = $this->invoice_time_to_minutes($r->FromTime ?? null);
+            $toM = $this->invoice_time_to_minutes($r->ToTime ?? null);
+            if ($fromM === null && isset($r->FtTime) && $r->FtTime !== null && $r->FtTime !== '') {
+                $fromM = $this->invoice_time_to_minutes($r->FtTime);
+            }
+            if ($toM === null && isset($r->TtTime) && $r->TtTime !== null && $r->TtTime !== '') {
+                $toM = $this->invoice_time_to_minutes($r->TtTime);
+            }
+            if ($fromM === null || $toM === null) {
+                continue;
+            }
+            if ($toM < $fromM) {
+                continue;
+            }
+            if ($earliest === null || $fromM < $earliest) {
+                $earliest = $fromM;
+            }
+            if ($latest === null || $toM > $latest) {
+                $latest = $toM;
+            }
+        }
+        if ($earliest === null || $latest === null) {
+            return '';
+        }
+        $a = $this->invoice_minutes_to_ampm($earliest);
+        $b = $this->invoice_minutes_to_ampm($latest);
+        if ($a === '' || $b === '') {
+            return '';
+        }
+
+        return $a . ' – ' . $b;
+    }
+
     public function __construct()
     {
        parent::__construct();
@@ -16,7 +165,6 @@ class Invoice extends CI_Controller
         $this->load->helper('url', 'form');
         $this->load->helper('amount');
         require_once APPPATH . 'libraries/EncDecAlgorithm.php';
-        $this->currency = 'Ringgit';
 
         $config = [
             'tempDir' => APPPATH . 'tmp' 
@@ -35,22 +183,18 @@ class Invoice extends CI_Controller
             if(!isset($chargeHeaderOBj[0]->EnrollmentId)) echo "Error in Page";
             $visit_id = $chargeHeaderOBj[0]->EnrollmentId; 
             $getData = $this->WebserviceModel->getEnrollmentDetails($visit_id);   
-          //  print_r( $getData->CurrrencyCode); exit;
+        //    print_r( $getData);
             
-            $usp_rpt_BillDetails = $this->ReportPdfModel->getDataFromSP('usp_rpt_BillDetails',$getData->PatientId,$visit_id );   
+            $usp_rpt_BillDetails = $this->ReportPdfModel->getDataFromSP('usp_rpt_BillDetails',$getData->PatientId,$visit_id );
+            $usp_rpt_BillDetails = $this->ReportPdfModel->enrichBillDetailsFromChargeEntryDetails((int) $chargeID, $usp_rpt_BillDetails);
             $usp_rpt_InvoiceDetails = $this->ReportPdfModel->getDataFromSP('usp_rpt_InvoiceDetails',$getData->PatientId,$visit_id );
             $usp_rpt_PatientDetails = $this->ReportPdfModel->getDataFromSP('usp_rpt_PatientDetails',$getData->PatientId,$visit_id );
             $usp_rpt_PaymentDetails = $this->ReportPdfModel->getDataFromSP('usp_rpt_PaymentDetails',$getData->PatientId,$visit_id );
-             $patientDetails = !empty($usp_rpt_PatientDetails) ? $usp_rpt_PatientDetails[0] : null;
-
-            // echo "<pre>";
-            // print_r( $usp_rpt_BillDetails); 
-            //  print_r( $usp_rpt_InvoiceDetails);
-            //  print_r( $usp_rpt_PatientDetails);
-            // print_r(  $patientDetails); exit;
-             if (!empty($patientDetails->PhoneNo)) {
-                $decryptedPhoneNo = $this->encryptDecrypt("dc", $patientDetails->PhoneNo);
-            }
+        //    echo "<pre>";
+        //      print_r( $usp_rpt_BillDetails);
+        //      print_r( $usp_rpt_InvoiceDetails);
+        //      print_r( $usp_rpt_PatientDetails);
+        //     print_r(  $usp_rpt_PaymentDetails); exit;
             if($getData)
             {
                 
@@ -66,46 +210,58 @@ class Invoice extends CI_Controller
        // echo 1; exit;
         // 1. Get data from DB if needed (dummy array shown)
 
-       $this->currency = $getData->CurrrencyCode ;
-      // echo "<pre>"; 
-     //   print_r($getData); 'PatientMRN' => $patientDetails->Prn ?? '',
+        $hdr = $chargeHeaderOBj[0] ?? null;
+        $firstBillRow = !empty($usp_rpt_BillDetails[0]) ? $usp_rpt_BillDetails[0] : null;
+        $invoice_no_raw = invoice_raw_number_from_first_line($firstBillRow);
+        if ($invoice_no_raw === '') {
+            $invoice_no_display = 'Draft';
+            $invoice_date_display = '';
+        } else {
+            $invoice_no_display = $invoice_no_raw;
+            $invoice_date_display = invoice_resolve_display_date_from_invoice_date($hdr, $firstBillRow);
+        }
+
+        $tenantId = isset($getData->TenantId) ? (int) $getData->TenantId : 0;
+        $doctorLicence = trim((string) ($getData->MMCNumber ?? ''));
+        if ($doctorLicence === '' && !empty($getData->PractitionerCode)) {
+            $doctorLicence = trim((string) $getData->PractitionerCode);
+        }
+        $clinicWebsite = $this->invoice_tenant_website_from_enrollment($getData);
+
         $data = [
             'visit_id'  => $visit_id,
              'Presp' => $usp_rpt_BillDetails,
-             'Bill' => $usp_rpt_InvoiceDetails,
-             'currency'=>$getData->CurrrencyCode,
             'payment_detail'=>$usp_rpt_PaymentDetails,
-            'tenant' => [
-                'name' => $patientDetails->TenantName ?? $getData->TenantName ?? 'RING Clinic',
-                'address' => $patientDetails->TenantAddress ?? $getData->TenantAddress ?? '',
-                 'CityDescription' => $getData->CityDescription ?? $getData->CityDescription ?? '',
-                 'StateDescription' => $getData->StateDescription ?? $getData->StateDescription ?? '',
-                 'CountryDescription' => $getData->CountryDescription ?? $getData->CountryDescription ?? '',
-                 'postcode' => $getData->postcode ?? $getData->postcode ?? '',
-                'phone' => $decryptedPhoneNo ?: ($getData->PhoneNo ?? ''),
-                'email' => '',
-                'logo' => $patientDetails->tenantLogo ?? ''
-            ],
+            'invoice_no_display' => $invoice_no_display,
+            'invoice_date_display' => $invoice_date_display,
             'patient'   => [
                 'name' => $getData->FirstName .' '.$getData->LastName,
                 'age'  => $getData->Age,
                 'sex'  => $getData->GenderDescription[0],
                 'appointmentDate'=> date('d M Y', strtotime( $getData->AppointmentDate)),
-                'AppointmentNo'=> $getData->AppointmentNo,
-                'PatientMRN' => $patientDetails->Prn ?? ''
+                'AppointmentNo'=> $getData->AppointmentNo
             ],
              'doctor'   => [
                          'name' => $getData->DoctorFName .' '.$getData->DoctorLName  ,
-                         'deprt' => $getData->Department        
+                         'deprt' => $getData->Department,
+                         'licence_no' => $doctorLicence,
+                         'primary_speciality' => trim((string) ($getData->DoctorPrimarySpeciality ?? '')),
+                         'secondary_speciality' => trim((string) ($getData->DoctorSecondarySpeciality ?? '')),
              ],
 
-           
+            'tenant' => [
+                         'name' => $getData->TenantName ,
+                         'address' => $getData->TenantAddress ,
+                         'email' => trim((string) ($getData->TenantEmail ?? '')),
+                         'website' => $clinicWebsite,
+                         'facility_working_hours' => $this->format_facility_working_hours($tenantId),
+                           ],
+
             // add whatever you want to pass into the view
         ];
-        
-        //   print_r($data); exit;
+
         // 2. Load HTML from view
-         $html = $this->load->view('ring_invoice', $data, true);   //exit ;
+        $html = $this->load->view('ring_invoice', $data, true);  
 
         // 3. Load mPDF library
        // $this->load->library('mn_pdf');
@@ -114,134 +270,29 @@ class Invoice extends CI_Controller
         // $this->m_pdf->pdf->setBasePath(base_url());
 
         // 5. Write HTML to PDF
-        $this->mpdf->shrink_tables_to_fit = 0;
-        $this->mpdf->keep_table_proportions = true;
         $this->mpdf->WriteHTML($html);
 
-           
+
         // 6. Output PDF (I = inline, D = download)
-       $fileName = 'RING_Invoice_' . ($visit_id ?: 'print') . '.pdf';
-       $this->mpdf->Output($fileName, 'I');
+        $fileName = 'RING_Invoice_' . ($visit_id ?: 'print') . '.pdf';
+        $this->mpdf->Output($fileName, 'I');
     }
 
-    public function print_new($chargeID = null)
-{
-    if (empty($chargeID)) {
-        show_error('Invalid Charge ID');
-        return;
+    /**
+     * Inline bill PDF — same output as print(). Use index.php/invoice/bill/{chargeId}
+     * (routes may alias here; if not, this method still resolves the URL).
+     * Totals exclude ItemMaster BillingType = 2 (non-billable) via ring_invoice + bill_line_is_billable().
+     */
+    public function bill($chargeID = null)
+    {
+        $this->print($chargeID);
     }
-
-    $chargeHeaderOBj = $this->ReportPdfModel->getEnrolentID($chargeID);
-
-    if (empty($chargeHeaderOBj) || !isset($chargeHeaderOBj[0]->EnrollmentId)) {
-        show_error('Enrollment not found');
-        return;
-    }
-
-    $visit_id = $chargeHeaderOBj[0]->EnrollmentId;
-    $getData  = $this->WebserviceModel->getEnrollmentDetails($visit_id);
-
-    if (empty($getData)) {
-        show_error('Enrollment details not found');
-        return;
-    }
-
-    $usp_rpt_BillDetails     = $this->ReportPdfModel->getDataFromSP('usp_rpt_BillDetails', $getData->PatientId, $visit_id);
-    $usp_rpt_InvoiceDetails  = $this->ReportPdfModel->getDataFromSP('usp_rpt_InvoiceDetails', $getData->PatientId, $visit_id);
-    $usp_rpt_PatientDetails  = $this->ReportPdfModel->getDataFromSP('usp_rpt_PatientDetails', $getData->PatientId, $visit_id);
-    $usp_rpt_PaymentDetails  = $this->ReportPdfModel->getDataFromSP('usp_rpt_PaymentDetails', $getData->PatientId, $visit_id);
-
-    $patientDetails = !empty($usp_rpt_PatientDetails) ? $usp_rpt_PatientDetails[0] : null;
-    $invoiceDetails = !empty($usp_rpt_InvoiceDetails) ? $usp_rpt_InvoiceDetails[0] : null;
-
-    $decryptedPhoneNo = '';
-
-    if (!empty($patientDetails) && !empty($patientDetails->PhoneNo)) {
-        $decryptedPhoneNo = $this->encryptDecrypt("dc", $patientDetails->PhoneNo);
-    } elseif (!empty($getData->PhoneNo)) {
-        $decryptedPhoneNo = $getData->PhoneNo;
-    }
-
-    // Decrypt patient name
-    $getData->FirstName = !empty($getData->FullName) ? $this->encryptDecrypt("dc", $getData->FullName) : '';
-    $getData->LastName  = !empty($getData->LastName) ? $this->encryptDecrypt("dc", $getData->LastName) : '';
-
-    // Format time safely
-    $getData->FromTime = '';
-    if (!empty($getData->FromTime)) {
-        $fromTimeObj = DateTime::createFromFormat('Y-m-d H:i:s.u', $getData->FromTime);
-        if ($fromTimeObj) {
-            $getData->FromTime = $fromTimeObj->format('H:i');
-        }
-    }
-
-    $getData->ToTime = '';
-    if (!empty($getData->ToTime)) {
-        $toTimeObj = DateTime::createFromFormat('Y-m-d H:i:s.u', $getData->ToTime);
-        if ($toTimeObj) {
-            $getData->ToTime = $toTimeObj->format('H:i');
-        }
-    }
-
-    $getData->Age = !empty($getData->DateOfBirth) ? $this->ageCalculator($getData->DateOfBirth) : '';
-
-    $this->currency = $getData->CurrrencyCode ?? '';
-
-    $data = [
-        'visit_id' => $visit_id,
-        'BillDetails' => $usp_rpt_BillDetails,
-        'InvoiceDetails' => $usp_rpt_InvoiceDetails,
-        'InvoiceSummary' => $invoiceDetails,
-        'currency' => $getData->CurrrencyCode ?? '',
-        'payment_detail' => $usp_rpt_PaymentDetails,
-
-        'tenant' => [
-            'name' => $patientDetails->TenantName ?? $getData->TenantName ?? 'RING Clinic',
-            'address' => $patientDetails->TenantAddress ?? $getData->TenantAddress ?? '',
-            'CityDescription' => $getData->CityDescription ?? '',
-            'StateDescription' => $getData->StateDescription ?? '',
-            'CountryDescription' => $getData->CountryDescription ?? '',
-            'postcode' => $getData->PostCode ?? '',
-            'phone' => $decryptedPhoneNo,
-            'email' => '',
-            'logo' => $patientDetails->tenantLogo ?? ''
-        ],
-
-        'patient' => [
-            'name' => trim(($getData->FirstName ?? '') . ' ' . ($getData->LastName ?? '')),
-            'age' => $getData->Age ?? '',
-            'sex' => !empty($getData->GenderDescription) ? substr($getData->GenderDescription, 0, 1) : '',
-            'appointmentDate' => !empty($getData->AppointmentDate) ? date('d M Y', strtotime($getData->AppointmentDate)) : '',
-            'AppointmentNo' => $getData->AppointmentNo ?? '',
-            'PatientMRN' => $patientDetails->Prn ?? ''
-        ],
-
-        'doctor' => [
-            'name' => trim(($getData->DoctorFName ?? '') . ' ' . ($getData->DoctorLName ?? '')),
-            'deprt' => $getData->Department ?? ''
-        ],
-    ];
-
-    // Uncomment only for debug
-    /*
-    echo "<pre>";
-    print_r($data);
-    exit;
-    */
-
-    $html = $this->load->view('ring_invoice', $data, true);
-
-    $this->mpdf->WriteHTML($html);
-
-    $fileName = 'RING_Invoice_' . $visit_id . '.pdf';
-    $this->mpdf->Output($fileName, 'I');
-}
 
     /**
      * Get bill detail as JSON (same logic as print, for drawer display).
      * GET /api/invoice/bill-detail/{chargeId}
      */
-    public function billDetail($chargeID = null)           // Need to remove
+    public function billDetail($chargeID = null)
     {
         header('Content-Type: application/json');
         if (!$chargeID) {
@@ -260,14 +311,13 @@ class Invoice extends CI_Controller
             return;
         }
         $usp_rpt_BillDetails = $this->ReportPdfModel->getDataFromSP('usp_rpt_BillDetails', $getData->PatientId, $visit_id);
+        $usp_rpt_BillDetails = $this->ReportPdfModel->enrichBillDetailsFromChargeEntryDetails((int) $chargeID, $usp_rpt_BillDetails);
         $usp_rpt_InvoiceDetails = $this->ReportPdfModel->getDataFromSP('usp_rpt_InvoiceDetails', $getData->PatientId, $visit_id);
         $usp_rpt_PatientDetails = $this->ReportPdfModel->getDataFromSP('usp_rpt_PatientDetails', $getData->PatientId, $visit_id);
         $usp_rpt_PaymentDetails = $this->ReportPdfModel->getDataFromSP('usp_rpt_PaymentDetails', $getData->PatientId, $visit_id);
-        $patientDetails = !empty($usp_rpt_PatientDetails) ? $usp_rpt_PatientDetails[0] : null;
 
         $getData->FirstName = $this->encryptDecrypt("dc", $getData->FullName);
         $getData->LastName = $this->encryptDecrypt("dc", $getData->LastName);
-        
         if (!empty($getData->FromTime)) {
             $FromTime = @DateTime::createFromFormat('Y-m-d H:i:s.u', $getData->FromTime);
             if ($FromTime) $getData->FromTime = $FromTime->format('H:i');
@@ -280,17 +330,29 @@ class Invoice extends CI_Controller
 
         $totalAmt = 0;
         $totalDisc = 0;
+        $totalTax = 0;
         $billItems = [];
         foreach ($usp_rpt_BillDetails as $p) {
-            $totalAmt += (float) $p->Amount;
-            $totalDisc += (float) ($p->Discount ?? 0);
+            $lineTax = bill_line_tax_amount($p);
+            $billable = bill_line_is_billable($p);
+            if ($billable) {
+                $totalAmt += (float) ($p->Amount ?? 0);
+                $totalDisc += (float) ($p->Discount ?? 0);
+                $totalTax += $lineTax;
+            }
+            $desc = $p->Description ?? '';
+            if (!$billable && $desc !== '') {
+                $desc .= ' (Non-billable)';
+            }
             $billItems[] = [
                 'code' => $p->Code ?? '',
-                'description' => $p->Description ?? '',
+                'description' => $desc,
                 'quantity' => (float) ($p->Quantity ?? 0),
-                'unitPrice' => (float) ($p->UnitPrice ?? 0),
-                'discount' => (float) ($p->Discount ?? 0),
-                'amount' => (float) ($p->Amount ?? 0),
+                'unitPrice' => $billable ? (float) ($p->UnitPrice ?? 0) : 0.0,
+                'discount' => $billable ? (float) ($p->Discount ?? 0) : 0.0,
+                'amount' => $billable ? (float) ($p->Amount ?? 0) : 0.0,
+                'tax' => $billable ? $lineTax : 0.0,
+                'netAmount' => $billable ? bill_line_net_amount($p) : 0.0,
             ];
         }
 
@@ -311,34 +373,41 @@ class Invoice extends CI_Controller
         }
 
         $firstBill = $usp_rpt_BillDetails[0] ?? null;
-        $invoiceNo = $firstBill && isset($firstBill->InvoiceNo) ? $firstBill->InvoiceNo : '';
-        $invoiceDate = '';
-        if ($firstBill && !empty($firstBill->BillDate ?? $firstBill->InvoiceDate ?? null)) {
-            $invoiceDate = date('d M Y', strtotime($firstBill->BillDate ?? $firstBill->InvoiceDate));
+        $hdr = $chargeHeaderOBj[0] ?? null;
+        $invoice_no_raw = invoice_raw_number_from_first_line($firstBill);
+        if ($invoice_no_raw === '') {
+            $invoiceNo = 'Draft';
+            $invoiceDate = '';
         } else {
-            $invoiceDate = date('d M Y');
+            $invoiceNo = $invoice_no_raw;
+            $invoiceDate = invoice_resolve_display_date_from_invoice_date($hdr, $firstBill);
         }
-        $balance = $totalAmt - $totalDisc;
+        $balance = ($totalAmt - $totalDisc) + $totalTax;
+
+        $tenantId = isset($getData->TenantId) ? (int) $getData->TenantId : 0;
+        $doctorLicence = trim((string) ($getData->MMCNumber ?? ''));
+        if ($doctorLicence === '' && !empty($getData->PractitionerCode)) {
+            $doctorLicence = trim((string) $getData->PractitionerCode);
+        }
+        $clinicWebsite = $this->invoice_tenant_website_from_enrollment($getData);
 
         $data = [
             'success' => true,
             'visitId' => (int) $visit_id,
             'chargeId' => (int) $chargeID,
-          
-              'tenant' => [
-                'name' => $patientDetails->TenantName ?? $getData->TenantName ?? 'RING Clinic',
-                'address' => $patientDetails->TenantAddress ?? $getData->TenantAddress ?? '',
-                 'CityDescription' => $getData->CityDescription ?? $getData->CityDescription ?? '',
-                 'StateDescription' => $getData->StateDescription ?? $getData->StateDescription ?? '',
-                 'CountryDescription' => $getData->CountryDescription ?? $getData->CountryDescription ?? '',
-                 'postcode' => $getData->postcode ?? $getData->postcode ?? '',
-                'phone' => $decryptedPhoneNo ?: ($getData->PhoneNo ?? ''),
-                'email' => '',
-                'logo' => $patientDetails->tenantLogo ?? ''
+            'tenant' => [
+                'name' => $getData->TenantName ?? '',
+                'address' => $getData->TenantAddress ?? '',
+                'email' => trim((string) ($getData->TenantEmail ?? '')),
+                'website' => $clinicWebsite,
+                'facilityWorkingHours' => $this->format_facility_working_hours($tenantId),
             ],
             'doctor' => [
                 'name' => ($getData->DoctorFName ?? '') . ' ' . ($getData->DoctorLName ?? ''),
                 'department' => $getData->Department ?? '',
+                'licenceNo' => $doctorLicence,
+                'primarySpeciality' => trim((string) ($getData->DoctorPrimarySpeciality ?? '')),
+                'secondarySpeciality' => trim((string) ($getData->DoctorSecondarySpeciality ?? '')),
             ],
             'patient' => [
                 'name' => trim(($getData->FirstName ?? '') . ' ' . ($getData->LastName ?? '')),
@@ -356,6 +425,7 @@ class Invoice extends CI_Controller
             'totals' => [
                 'subtotal' => $totalAmt,
                 'discount' => $totalDisc,
+                'tax' => $totalTax,
                 'balance' => $balance,
                 'amountInWords' => $this->amountInWordsMYR($balance),
             ],
@@ -463,12 +533,18 @@ class Invoice extends CI_Controller
     }
 
 
-function amountInWordsMYR($number,$currency='')
+function amountInWordsMYR($number)
 {
+    if (is_string($number)) {
+        $number = str_replace(',', '', $number);
+    }
+    $number = (float) $number;
     $no = floor($number);
     $decimal = round($number - $no, 2) * 100;
-   
-   
+    if ($no == 0 && (int) $decimal === 0) {
+        return 'Zero Ringgit Only';
+    }
+
     $words = [
         0 => '', 1 => 'One', 2 => 'Two', 3 => 'Three', 4 => 'Four',
         5 => 'Five', 6 => 'Six', 7 => 'Seven', 8 => 'Eight', 9 => 'Nine',
@@ -523,7 +599,7 @@ function amountInWordsMYR($number,$currency='')
         }
     }
 
-    return $result . ' '.$currency . $sen . ' Only';
+    return $result . ' Ringgit' . $sen . ' Only';
 }
 
 
@@ -640,7 +716,7 @@ function prescription($chargeID = null){
         }
         
         $visit_id = $chargeHeaderOBj[0]->EnrollmentId; 
-        $getData = $this->WebserviceModel->getEnrollmentDetails($visit_id); 
+        $getData = $this->WebserviceModel->getEnrollmentDetails($visit_id);
         
         if (!$getData) {
             ob_end_clean();
@@ -670,7 +746,7 @@ function prescription($chargeID = null){
         }
 
         $patientDetails = !empty($usp_rpt_PatientDetails) ? $usp_rpt_PatientDetails[0] : null;
-       // print_r( $patientDetails); exit ;
+        
         $genderChar = '';
         if (isset($getData->GenderDescription) && is_string($getData->GenderDescription) && strlen($getData->GenderDescription) > 0) {
             $genderChar = $getData->GenderDescription[0];
@@ -688,17 +764,37 @@ function prescription($chargeID = null){
             }
         }
 
+        $tenantId = isset($getData->TenantId) ? (int) $getData->TenantId : 0;
+        $doctorLicence = trim((string) ($getData->MMCNumber ?? ''));
+        if ($doctorLicence === '' && !empty($getData->PractitionerCode)) {
+            $doctorLicence = trim((string) $getData->PractitionerCode);
+        }
+        $clinicWebsite = $this->invoice_tenant_website_from_enrollment($getData);
+        $tenantPhone = '';
+        if ($patientDetails) {
+            $tenantPhone = trim((string) (($patientDetails->MobileCode ?? '') . ' ' . $decryptedPhoneNo));
+            if ($tenantPhone === '') {
+                $tenantPhone = $decryptedPhoneNo ?: (string) ($patientDetails->PhoneNo ?? '');
+            }
+        } elseif ($decryptedPhoneNo !== '') {
+            $tenantPhone = $decryptedPhoneNo;
+        }
+
         $data = [
-              'tenant' => [
-                'name' => $patientDetails->TenantName ?? $getData->TenantName ?? 'RING Clinic',
-                'address' => $patientDetails->TenantAddress ?? $getData->TenantAddress ?? '',
-                 'CityDescription' => $getData->CityDescription ?? $getData->CityDescription ?? '',
-                 'StateDescription' => $getData->StateDescription ?? $getData->StateDescription ?? '',
-                 'CountryDescription' => $getData->CountryDescription ?? $getData->CountryDescription ?? '',
-                 'postcode' => $getData->postcode ?? $getData->postcode ?? '',
-                'phone' => $decryptedPhoneNo ?: ($getData->PhoneNo ?? ''),
-                'email' => '',
-                'logo' => $patientDetails->tenantLogo ?? ''
+            'tenant' => [
+                'name' => $getData->TenantName ?? ($patientDetails->TenantName ?? 'RING Clinic'),
+                'address' => $getData->TenantAddress ?? ($patientDetails->TenantAddress ?? ''),
+                'email' => trim((string) ($getData->TenantEmail ?? '')),
+                'website' => $clinicWebsite,
+                'facility_working_hours' => $this->format_facility_working_hours($tenantId),
+                'phone' => $tenantPhone,
+                'logo' => $patientDetails->tenantLogo ?? '',
+            ],
+            'doctor' => [
+                'name' => trim(($getData->DoctorFName ?? '') . ' ' . ($getData->DoctorLName ?? '')),
+                'licence_no' => $doctorLicence,
+                'primary_speciality' => trim((string) ($getData->DoctorPrimarySpeciality ?? '')),
+                'secondary_speciality' => trim((string) ($getData->DoctorSecondarySpeciality ?? '')),
             ],
             'patient' => [
                 'PatientFullName' => ($getData->FirstName ?? '') . ' ' . ($getData->LastName ?? ''),
@@ -766,8 +862,8 @@ function prescription($chargeID = null){
     }
 }
 
-function clinicalsummary($chargeID = null)
-{
+function clinicalsummary($chargeID = null){
+
     if ($this->input->server('REQUEST_METHOD') == 'OPTIONS') {
         echo json_encode(['status' => 1, 'message' => 'ok', 'data' => []]);
         exit;
@@ -798,33 +894,39 @@ function clinicalsummary($chargeID = null)
         }
 
         $patientId = $getData->PatientId;
+        $usp_rpt_PatientDetails = $this->ReportPdfModel->getDataFromSP('usp_rpt_PatientDetails', $patientId, $visit_id);
+        $usp_rpt_Medicalhistory = $this->ReportPdfModel->getDataFromSP('usp_rpt_Medicalhistory', $patientId, $visit_id);
+        $usp_rpt_Allergies = $this->ReportPdfModel->getDataFromSP('usp_rpt_Allergies', $patientId, $visit_id);
+        $usp_rpt_ProgressNotes = $this->ReportPdfModel->getDataFromSP('usp_rpt_ProgressNotes', $patientId, $visit_id);
+        $usp_rpt_Investigations = $this->ReportPdfModel->getDataFromSP('usp_rpt_Investigations', $patientId, $visit_id);
+        $usp_rpt_Prescription = $this->ReportPdfModel->getDataFromSP('usp_rpt_Prescription', $patientId, $visit_id);
+        $usp_rpt_DischargeNotes = $this->ReportPdfModel->getDataFromSP('usp_rpt_DischargeNotes', $patientId, $visit_id);
 
-        // Get all clinical summary data
-        $clinicalData = $this->ReportPdfModel->getClinicalSummary($patientId, $visit_id);
+        if ($getData) {
+            $getData->FirstName = $this->encryptDecrypt("dc", $getData->FullName);
+            $getData->LastName = $this->encryptDecrypt("dc", $getData->LastName);
 
-        // Decrypt / format patient basic details
-        $getData->FirstName = $this->encryptDecrypt("dc", $getData->FullName);
-        $getData->LastName  = $this->encryptDecrypt("dc", $getData->LastName);
-
-        if (!empty($getData->FromTime)) {
-            $FromTime = @DateTime::createFromFormat('Y-m-d H:i:s.u', $getData->FromTime);
-            if ($FromTime) $getData->FromTime = $FromTime->format('H:i');
+            if (!empty($getData->FromTime)) {
+                $FromTime = @DateTime::createFromFormat('Y-m-d H:i:s.u', $getData->FromTime);
+                if ($FromTime) {
+                    $getData->FromTime = $FromTime->format('H:i');
+                }
+            }
+            if (!empty($getData->ToTime)) {
+                $ToTime = @DateTime::createFromFormat('Y-m-d H:i:s.u', $getData->ToTime);
+                if ($ToTime) {
+                    $getData->ToTime = $ToTime->format('H:i');
+                }
+            }
+            $getData->Age = $this->ageCalculator($getData->DateOfBirth);
         }
 
-        if (!empty($getData->ToTime)) {
-            $ToTime = @DateTime::createFromFormat('Y-m-d H:i:s.u', $getData->ToTime);
-            if ($ToTime) $getData->ToTime = $ToTime->format('H:i');
+        $patientDetails = !empty($usp_rpt_PatientDetails) ? $usp_rpt_PatientDetails[0] : null;
+
+        $genderChar = '';
+        if (isset($getData->GenderDescription) && is_string($getData->GenderDescription) && strlen($getData->GenderDescription) > 0) {
+            $genderChar = $getData->GenderDescription[0];
         }
-
-        $getData->Age = $this->ageCalculator($getData->DateOfBirth);
-
-        $patientDetails   = !empty($clinicalData['patient_details']) ? $clinicalData['patient_details'][0] : null;
-        $allergies        = $clinicalData['allergies'] ?? [];
-        $prescriptions    = $clinicalData['prescription'] ?? [];
-        $medicalHistory   = $clinicalData['medical_history'] ?? [];
-        $progressNotes    = $clinicalData['progress_notes'] ?? [];
-        $investigations   = $clinicalData['investigations'] ?? [];
-        $dischargeNotes   = $clinicalData['discharge_notes'] ?? [];
 
         $decryptedIdentityNo = '';
         $decryptedPhoneNo = '';
@@ -838,111 +940,167 @@ function clinicalsummary($chargeID = null)
             }
         }
 
+        $tenantId = isset($getData->TenantId) ? (int) $getData->TenantId : 0;
+        $doctorLicence = trim((string) ($getData->MMCNumber ?? ''));
+        if ($doctorLicence === '' && !empty($getData->PractitionerCode)) {
+            $doctorLicence = trim((string) $getData->PractitionerCode);
+        }
+        $clinicWebsite = $this->invoice_tenant_website_from_enrollment($getData);
+        $tenantPhone = '';
+        if ($patientDetails) {
+            $tenantPhone = trim((string) (($patientDetails->MobileCode ?? '') . ' ' . $decryptedPhoneNo));
+            if ($tenantPhone === '') {
+                $tenantPhone = $decryptedPhoneNo ?: (string) ($patientDetails->PhoneNo ?? '');
+            }
+        } elseif ($decryptedPhoneNo !== '') {
+            $tenantPhone = $decryptedPhoneNo;
+        }
+
+        $pnList = is_array($usp_rpt_ProgressNotes) ? $usp_rpt_ProgressNotes : [];
+        $pn0 = !empty($pnList[0]) ? $pnList[0] : null;
+
+        $progress = [
+            'Complaints' => $this->rpt_first_prop($pn0, ['Complaints', 'ChiefComplaint', 'PresentingComplaint'], '—'),
+            'Diagnosis' => $this->rpt_first_prop($pn0, ['Diagnosis', 'ProvisionalDiagnosis', 'FinalDiagnosis'], '—'),
+            'Pulse' => $this->rpt_first_prop($pn0, ['Pulse', 'PulseRate'], '—'),
+            'BP' => $this->rpt_first_prop($pn0, ['BP', 'BloodPressure'], '—'),
+            'Temperature' => $this->rpt_first_prop($pn0, ['Temperature', 'Temp'], '—'),
+            'RespiratoryRate' => $this->rpt_first_prop($pn0, ['RespiratoryRate', 'Respiration', 'RR'], '—'),
+        ];
+
+        $progressNoteLines = [];
+        foreach ($pnList as $row) {
+            $text = $this->rpt_first_prop($row, [
+                'ProgressNotes', 'Notes', 'Note', 'ConsultationNote', 'SOAPNote', 'ClinicalNote', 'Description',
+            ], '');
+            $dt = $this->rpt_first_prop($row, [
+                'NoteDate', 'RecordDate', 'CreatedOn', 'VisitDate', 'DateTime', 'ProgressNoteDate',
+            ], '');
+            if ($text !== '' || $dt !== '') {
+                $progressNoteLines[] = ['date' => $dt, 'text' => $text];
+            }
+        }
+
+        $dischargeList = is_array($usp_rpt_DischargeNotes) ? $usp_rpt_DischargeNotes : [];
+        $dischargeRows = [];
+        foreach ($dischargeList as $drow) {
+            $dischargeRows[] = [
+                'doctorName' => $this->rpt_first_prop($drow, [
+                    'DoctorName', 'doctorName', 'DischargeDoctor', 'ConsultantName', 'Doctor', 'PhysicianName',
+                ], ''),
+                'dischargeDateTime' => $this->rpt_scalar_for_display($drow, [
+                    'InsertDate', 'insertDate', 'DischargeDateTime', 'dischargeDateTime', 'DischargeDate',
+                ]),
+                'icdDescription' => $this->rpt_first_prop($drow, [
+                    'ICDCodeDescription', 'icdCodeDescription', 'ICDDescription', 'FinalDiagnosis',
+                ], ''),
+                'dischargeNotes' => $this->rpt_first_prop($drow, ['DischargeNotes', 'dischargeNotes'], ''),
+                'dischargedBy' => $this->rpt_first_prop($drow, [
+                    'DischargedBy', 'DischargeBy', 'DischargedByName', 'AddedBy',
+                ], ''),
+                'followUpDateTime' => $this->rpt_scalar_for_display($drow, [
+                    'FollowUpDateTime', 'followUpDateTime',
+                ]),
+                'followUpRemark' => $this->rpt_first_prop($drow, [
+                    'FollowUpRemark', 'followUpRemark', 'FollowUpNotes',
+                ], ''),
+                'followUpDate' => $this->rpt_scalar_for_display($drow, ['FollowUpDate', 'followUpDate', 'NextVisitDate']),
+                'remark' => $this->rpt_first_prop($drow, [
+                    'Remark', 'Remarks', 'DischargeRemark', 'Summary', 'GeneralRemark',
+                ], ''),
+            ];
+        }
+
+        $mhRows = is_array($usp_rpt_Medicalhistory) ? $usp_rpt_Medicalhistory : [];
+
         $data = [
             'tenant' => [
-                'name' => $patientDetails->TenantName ?? $getData->TenantName ?? 'RING Clinic',
-                'address' => $patientDetails->TenantAddress ?? $getData->TenantAddress ?? '',
-                 'CityDescription' => $getData->CityDescription ?? $getData->CityDescription ?? '',
-                 'StateDescription' => $getData->StateDescription ?? $getData->StateDescription ?? '',
-                 'CountryDescription' => $getData->CountryDescription ?? $getData->CountryDescription ?? '',
-                 'postcode' => $getData->postcode ?? $getData->postcode ?? '',
-                'phone' => $decryptedPhoneNo ?: ($getData->PhoneNo ?? ''),
-                'email' => '',
-                'logo' => $patientDetails->tenantLogo ?? ''
+                'name' => $getData->TenantName ?? ($patientDetails->TenantName ?? 'RING Clinic'),
+                'address' => $getData->TenantAddress ?? ($patientDetails->TenantAddress ?? ''),
+                'email' => trim((string) ($getData->TenantEmail ?? '')),
+                'website' => $clinicWebsite,
+                'facility_working_hours' => $this->format_facility_working_hours($tenantId),
+                'phone' => $tenantPhone,
+                'logo' => $patientDetails->tenantLogo ?? '',
+            ],
+            'doctor' => [
+                'name' => trim(($getData->DoctorFName ?? '') . ' ' . ($getData->DoctorLName ?? '')),
+                'licence_no' => $doctorLicence,
+                'primary_speciality' => trim((string) ($getData->DoctorPrimarySpeciality ?? '')),
+                'secondary_speciality' => trim((string) ($getData->DoctorSecondarySpeciality ?? '')),
             ],
             'patient' => [
-                'PatientFullName' => trim(($getData->FirstName ?? '') . ' ' . ($getData->LastName ?? '')),
-                'Address'         => $patientDetails->Address ?? '',
-                'Phone'           => ($patientDetails->MobileCode ?? '') . ' ' . $decryptedPhoneNo,
-                'Age'             => $patientDetails->DateOfBirth ?? $getData->Age ?? '',
-                'Sex'             => $patientDetails->GenderId ?? '',
-                'ICPassport'      => $decryptedIdentityNo ?: ($patientDetails->IdentityNo ?? ''),
-                'PatientMRN'      => $patientDetails->Prn ?? '',
+                'PatientFullName' => ($getData->FirstName ?? '') . ' ' . ($getData->LastName ?? ''),
+                'Address' => $patientDetails->Address ?? '',
+                'Phone' => ($patientDetails->MobileCode ?? '') . ' ' . $decryptedPhoneNo,
+                'Age' => $patientDetails->DateOfBirth ?? $getData->Age ?? '',
+                'Sex' => $patientDetails->GenderId ?? $genderChar,
+                'ICPassport' => $decryptedIdentityNo ?: ($patientDetails->IdentityNo ?? ''),
+                'PatientMRN' => $patientDetails->Prn ?? '',
             ],
             'visit' => [
                 'DateOfVisit' => $patientDetails->EnrollmentDate ?? (!empty($getData->AppointmentDate) ? date('d/m/Y', strtotime($getData->AppointmentDate)) : ''),
-                'VisitNo'     => $patientDetails->EncounterNo ?? $getData->AppointmentNo ?? '',
-                'Consultant'  => $patientDetails->Consultant ?? (($getData->DoctorFName ?? '') . ' ' . ($getData->DoctorLName ?? ''))
+                'VisitNo' => $patientDetails->EncounterNo ?? $getData->AppointmentNo ?? '',
+                'Consultant' => $patientDetails->Consultant ?? (($getData->DoctorFName ?? '') . ' ' . ($getData->DoctorLName ?? '')),
             ],
             'meta' => [
-                'DateOfPrinting' => $patientDetails->CurrentDateTime ?? date('d M Y, h:i A')
+                'DateOfPrinting' => $patientDetails->CurrentDateTime ?? date('d M Y, h:i A'),
             ],
-            'printedBy' => 'System',
-
-            'allergies' => array_map(function($item) {
+            'progress' => $progress,
+            'medicalHistory' => array_map(function ($item) {
+                return [
+                    'DiseaseOrSurgery' => $this->rpt_first_prop($item, ['DiseaseOrSurgery', 'Disease', 'Description', 'Condition'], ''),
+                    'DoctorHospital' => $this->rpt_first_prop($item, ['DoctorHospital', 'HospitalName', 'Hospital', 'Doctor', 'Surgeon'], ''),
+                    'DateIdentified' => $this->rpt_first_prop($item, ['DateIdentified', 'Date', 'YearOfEvent', 'FromDate'], ''),
+                ];
+            }, $mhRows),
+            'allergies' => array_map(function ($item) {
                 return [
                     'DateIdentified' => $item->DateIdentified ?? '',
-                    'Details'        => $item->AllergyDetails ?? '',
-                    'Remarks'        => $item->Remarks ?? '',
-                    'Severity'       => $item->AllergySeverity ?? '',
-                    'Category'       => $item->AllergyCategory ?? ''
+                    'Details' => $item->AllergyDetails ?? '',
+                    'Remarks' => $item->Remarks ?? '',
+                    'Severity' => $item->AllergySeverity ?? '',
+                    'Category' => $item->AllergyCategory ?? '',
                 ];
-            }, $allergies),
-
-            'prescriptions' => array_map(function($item) {
+            }, is_array($usp_rpt_Allergies) ? $usp_rpt_Allergies : []),
+            'progressNoteLines' => $progressNoteLines,
+            'investigations' => array_map(function ($item) {
                 return [
-                    'Medication'    => $item->Medication ?? '',
-                    'Strength'      => $item->Strength ?? '',
-                    'Quantity'      => $item->Quantity ?? '',
-                    'Frequency'     => $item->FrequencyMasterDescription ?? '',
-                    'DurationDays'  => $item->Duration ?? '',
-                    'Instructions'  => $item->Instruction ?? ''
+                    'Type' => $this->rpt_first_prop($item, [
+                        'Investigation', 'InvestigationType', 'TestName', 'Type', 'Description', 'Name',
+                    ], ''),
+                    'DateTime' => $this->rpt_first_prop($item, [
+                        'Date', 'RequestDate', 'TestDate', 'DateTime', 'OrderedDate',
+                    ], ''),
+                    'Notes' => $this->rpt_first_prop($item, [
+                        'AddedBy', 'Notes', 'Remarks', 'Result', 'Findings', 'Report',
+                    ], ''),
                 ];
-            }, $prescriptions),
-
-            'medicalHistory' => array_map(function($item) {
+            }, is_array($usp_rpt_Investigations) ? $usp_rpt_Investigations : []),
+            'prescriptions' => array_map(function ($item) {
                 return [
-                    'Condition'   => $item->Condition ?? ($item->Diagnosis ?? ''),
-                    'Remarks'     => $item->Remarks ?? '',
-                    'RecordedOn'  => $item->RecordedOn ?? ''
+                    'Medication' => $item->Medication ?? '',
+                    'Strength' => '',
+                    'Quantity' => $item->Quantity ?? '',
+                    'Frequency' => $item->FrequencyMasterDescription ?? '',
+                    'DurationDays' => $item->Duration ?? '',
+                    'Instructions' => $item->Instruction ?? '',
                 ];
-            }, $medicalHistory),
-
-            'progressNotes' => array_map(function($item) {
-                return [
-                    'Date'          => $item->Date ?? '',
-                    'Complaints'    => $item->Complaints ?? '',
-                    'Diagnosis'     => $item->Diagnosis ?? '',
-                    'Notes'         => $item->Notes ?? '',
-                    'Pulse'         => $item->Pulse ?? '',
-                    'BP'            => $item->BP ?? '',
-                    'Temperature'   => $item->Temperature ?? '',
-                    'RespiratoryRate' => $item->RespiratoryRate ?? '',
-                ];
-            }, $progressNotes),
-
-            'investigations' => array_map(function($item) {
-                return [
-                    'Date'        => $item->Date ?? '',
-                    'TestName'    => $item->TestName ?? '',
-                    'Result'      => $item->Result ?? '',
-                    'Remarks'     => $item->Remarks ?? ''
-                ];
-            }, $investigations),
-
-            'dischargeNotes' => array_map(function($item) {
-                return [
-                    'Summary'        => $item->Summary ?? '',
-                    'Advice'         => $item->Advice ?? '',
-                    'FollowUp'       => $item->FollowUp ?? '',
-                    'DischargeDate'  => $item->DischargeDate ?? ''
-                ];
-            }, $dischargeNotes),
+            }, is_array($usp_rpt_Prescription) ? $usp_rpt_Prescription : []),
+            'dischargeRows' => $dischargeRows,
         ];
 
         ob_end_clean();
 
-        // Create separate clinical summary view
-        $html = $this->load->view('ring_summary', $data, true);
+        $html = $this->load->view('ring_clinical_summary', $data, true);
 
         $this->mpdf->WriteHTML($html);
 
         $fileName = 'RING_ClinicalSummary_' . ($visit_id ?: 'print') . '.pdf';
         $this->mpdf->Output($fileName, 'I');
-
     } catch (Exception $e) {
         ob_end_clean();
-        log_message('error', 'Clinical Summary error: ' . $e->getMessage());
+        log_message('error', 'Clinical summary error: ' . $e->getMessage());
         echo "Error generating clinical summary: " . $e->getMessage();
     }
 }

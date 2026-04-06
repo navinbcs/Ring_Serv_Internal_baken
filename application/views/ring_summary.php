@@ -16,7 +16,7 @@ $progress       = $progress ?? [];
 $investigations = $investigations ?? [];
 
 // Logo path - keep same as your bill
-$logoPath = FCPATH . 'assets/RingLogo.png';
+$logoPath = FCPATH . 'assets/SkeenLogo.png';
 $hasLogo  = !empty($logoPath) && file_exists($logoPath);
 
 // Safe defaults
